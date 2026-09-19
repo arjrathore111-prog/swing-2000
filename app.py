@@ -3,120 +3,374 @@ import yfinance as yf
 import pandas as pd
 import requests
 import io
+import numpy as np
 from datetime import datetime, timedelta
 
-# Page Setup
-st.set_page_config(page_title="Swing Screener Pro", layout="wide")
-st.title("🚀 Advanced Swing Trading Filter")
+# =========================================================
+# PAGE SETUP
+# =========================================================
 
-# --- Function: Indicator Calculation ---
+st.set_page_config(
+    page_title="Swing Screener Pro",
+    page_icon="📈",
+    layout="wide"
+)
+
+st.title("🚀 Advanced Swing Trading Screener")
+st.caption("EMA + RSI + MACD + ATR + Volume + VCP | Historical Date Analysis")
+
+
+# =========================================================
+# INDICATORS
+# =========================================================
+
 def add_indicators(df):
-    # EMA 50 & 200
-    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-    
-    # RSI (14)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
+
+    df = df.copy()
+
+    # -------------------------
+    # EMA
+    # -------------------------
+    df["EMA_50"] = df["Close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df["EMA_200"] = df["Close"].ewm(
+        span=200,
+        adjust=False
+    ).mean()
+
+    # -------------------------
+    # RSI 14
+    # -------------------------
+    delta = df["Close"].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # -------------------------
     # MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # ATR & Volume
-    df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-    df['Vol_Avg'] = df['Volume'].rolling(20).mean()
-    
-    # Volatility for VCP
-    df['Range'] = (df['High'] - df['Low']) / df['Close']
-    df['VCP_Check'] = df['Range'].rolling(5).mean() < df['Range'].rolling(20).mean()
-    
+    # -------------------------
+    ema12 = df["Close"].ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = df["Close"].ewm(
+        span=26,
+        adjust=False
+    ).mean()
+
+    df["MACD"] = ema12 - ema26
+
+    df["Signal"] = df["MACD"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    # -------------------------
+    # ATR 14
+    # -------------------------
+    prev_close = df["Close"].shift(1)
+
+    tr1 = df["High"] - df["Low"]
+    tr2 = abs(df["High"] - prev_close)
+    tr3 = abs(df["Low"] - prev_close)
+
+    true_range = pd.concat(
+        [tr1, tr2, tr3],
+        axis=1
+    ).max(axis=1)
+
+    df["ATR"] = true_range.rolling(14).mean()
+
+    # -------------------------
+    # Volume
+    # -------------------------
+    df["Vol_Avg"] = df["Volume"].rolling(20).mean()
+
+    df["Vol_Multiplier"] = (
+        df["Volume"] / df["Vol_Avg"]
+    )
+
+    # -------------------------
+    # VCP
+    # -------------------------
+    df["Range"] = (
+        (df["High"] - df["Low"]) /
+        df["Close"]
+    )
+
+    short_range = df["Range"].rolling(5).mean()
+    long_range = df["Range"].rolling(20).mean()
+
+    df["VCP_Check"] = short_range < long_range
+
     return df
 
-# --- Function: Load Tickers ---
-@st.cache_data
+
+# =========================================================
+# LOAD NIFTY 500 STOCKS
+# =========================================================
+
+@st.cache_data(ttl=3600)
 def get_tickers():
+
     try:
-        url = "https://raw.githubusercontent.com/anirban-m/indian-stock-tickers/main/nifty500.csv"
-        res = requests.get(url).text
-        df_t = pd.read_csv(io.StringIO(res))
-        return [str(s).strip() + ".NS" for s in df_t['Symbol'].tolist()]
-    except:
-        return ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "SBIN.NS", "ICICIBANK.NS"]
 
-# --- Sidebar Inputs ---
-st.sidebar.header("Scan Settings")
-target_date = st.sidebar.date_input("Analysis Date", datetime.now() - timedelta(days=1))
-rsi_min = st.sidebar.slider("Min RSI", 40, 70, 55)
-vol_min = st.sidebar.slider("Min Vol Multiplier", 1.0, 3.0, 1.2)
-num_stocks = st.sidebar.number_input("Stocks to Scan", value=100)
+        url = (
+            "https://raw.githubusercontent.com/"
+            "anirban-m/indian-stock-tickers/main/nifty500.csv"
+        )
 
-if st.sidebar.button("Start Advanced Scan"):
-    all_symbols = get_tickers()
-    selected_symbols = all_symbols[:num_stocks]
-    
+        response = requests.get(
+            url,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        df_t = pd.read_csv(
+            io.StringIO(response.text)
+        )
+
+        symbols = (
+            df_t["Symbol"]
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+
+        return [
+            symbol + ".NS"
+            for symbol in symbols
+        ]
+
+    except Exception:
+
+        return [
+            "RELIANCE.NS",
+            "TCS.NS",
+            "INFY.NS",
+            "HDFCBANK.NS",
+            "SBIN.NS",
+            "ICICIBANK.NS"
+        ]
+
+
+# =========================================================
+# DOWNLOAD HISTORICAL DATA
+# =========================================================
+
+def download_stock_data(symbol, target_date):
+
+    # We need enough historical data for EMA 200.
+    # Download 2 years ending AFTER target date.
+
+    start_date = target_date - timedelta(days=800)
     end_date = target_date + timedelta(days=1)
-    results = []
-    
-    st.info(f"Scanning {len(selected_symbols)} stocks for {target_date}...")
-    prog = st.progress(0)
-    status = st.empty()
-    
-    for i, sym in enumerate(selected_symbols):
-        prog.progress((i + 1) / len(selected_symbols))
-        status.text(f"Processing: {sym}")
-        
-        try:
-            # Download Data
-            data = yf.download(sym, end=end_date, period="2y", progress=False)
-            
-            # Handle New Yahoo Finance Multi-Index
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            
-            if data.empty or len(data) < 200:
-                continue
-                
-            df = add_indicators(data)
-            l = df.iloc[-1] # Latest Data Row
-            
-            # --- THE LOGIC ---
-            # 1. Trend: Close > EMA 50 & 200
-            trend_ok = (l['Close'] > l['EMA_50']) and (l['Close'] > l['EMA_200'])
-            
-            # 2. Momentum: RSI > User Input & MACD Bullish
-            momentum_ok = (l['RSI'] > rsi_min) and (l['MACD'] > l['Signal'])
-            
-            # 3. Volume: Vol > User Input * Avg
-            vol_ok = l['Volume'] > (l['Vol_Avg'] * vol_min)
-            
-            if trend_ok and momentum_ok and vol_ok:
-                sl = l['Close'] - (1.5 * l['ATR'])
-                tgt = l['Close'] + (3.0 * l['ATR'])
-                
-                results.append({
-                    "Symbol": sym.replace(".NS",""),
-                    "Price": round(float(l['Close']), 2),
-                    "RSI": round(float(l['RSI']), 1),
-                    "Vol_Spike": f"{round(float(l['Volume']/l['Vol_Avg']), 1)}x",
-                    "VCP": "✅" if l['VCP_Check'] else "❌",
-                    "StopLoss": round(float(sl), 2),
-                    "Target": round(float(tgt), 2)
-                })
-        except Exception as e:
-            continue
-            
-    status.empty()
-    
-    if results:
-        st.success(f"Found {len(results)} Stocks!")
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
-    else:
-        st.warning("No stocks found. Suggestions:")
-        st.write("1. Analysis Date ko pichle Friday par set karein.")
-        st.write("2. RSI ko 50 aur Vol Multiplier ko 1.0 karke try karein.")
+
+    data = yf.download(
+        symbol,
+        start=start_date,
+        end=end_date,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+        multi_level_index=False
+    )
+
+    if data is None or data.empty:
+        return None
+
+    # Remove timezone if present
+    if hasattr(data.index, "tz") and data.index.tz is not None:
+        data.index = data.index.tz_localize(None)
+
+    # Ensure normal DatetimeIndex
+    data.index = pd.to_datetime(data.index)
+
+    # Sometimes Yahoo can return MultiIndex.
+    if isinstance(data.columns, pd.MultiIndex):
+
+        data.columns = data.columns.get_level_values(-1)
+
+    required_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+    ]
+
+    for col in required_columns:
+
+        if col not in data.columns:
+            return None
+
+    data = data[required_columns].copy()
+
+    # Keep only data up to analysis date
+    target_timestamp = pd.Timestamp(target_date)
+
+    data = data[
+        data.index <= target_timestamp
+    ]
+
+    if len(data) < 220:
+        return None
+
+    return data
+
+
+# =========================================================
+# ANALYZE ONE STOCK
+# =========================================================
+
+def analyze_stock(symbol, target_date, rsi_min, vol_min):
+
+    data = download_stock_data(
+        symbol,
+        target_date
+    )
+
+    if data is None:
+        return None, "No sufficient historical data"
+
+    df = add_indicators(data)
+
+    # Drop rows where indicators are not ready
+    df = df.dropna(
+        subset=[
+            "EMA_50",
+            "EMA_200",
+            "RSI",
+            "MACD",
+            "Signal",
+            "ATR",
+            "Vol_Avg"
+        ]
+    )
+
+    if df.empty:
+        return None, "Indicators unavailable"
+
+    # IMPORTANT:
+    # Last row is now the latest trading day
+    # ON OR BEFORE selected Analysis Date.
+
+    latest = df.iloc[-1]
+
+    actual_date = df.index[-1].date()
+
+    close = float(latest["Close"])
+    ema50 = float(latest["EMA_50"])
+    ema200 = float(latest["EMA_200"])
+    rsi = float(latest["RSI"])
+    macd = float(latest["MACD"])
+    signal = float(latest["Signal"])
+    atr = float(latest["ATR"])
+    volume = float(latest["Volume"])
+    vol_avg = float(latest["Vol_Avg"])
+
+    vol_multiplier = (
+        volume / vol_avg
+        if vol_avg > 0
+        else 0
+    )
+
+    vcp = bool(latest["VCP_Check"])
+
+    # =====================================================
+    # CONDITIONS
+    # =====================================================
+
+    trend_ok = (
+        close > ema50
+        and
+        close > ema200
+    )
+
+    momentum_ok = (
+        rsi >= rsi_min
+        and
+        macd > signal
+    )
+
+    volume_ok = (
+        vol_multiplier >= vol_min
+    )
+
+    # =====================================================
+    # FINAL SIGNAL
+    # =====================================================
+
+    if not (
+        trend_ok
+        and momentum_ok
+        and volume_ok
+    ):
+        return None, "Conditions not satisfied"
+
+    # =====================================================
+    # STOP LOSS / TARGET
+    # =====================================================
+
+    # Risk = 1.5 ATR
+    risk = 1.5 * atr
+
+    stop_loss = close - risk
+
+    # Reward = 3 ATR
+    # Therefore Risk : Reward = 1 : 2
+    target = close + (3 * atr)
+
+    if stop_loss <= 0:
+        return None, "Invalid Stop Loss"
+
+    # =====================================================
+    # RESULT
+    # =====================================================
+
+    result = {
+
+        "Symbol":
+            symbol.replace(".NS", ""),
+
+        "Analysis Date":
+            actual_date.strftime("%Y-%m-%d"),
+
+        "Price":
+            round(close, 2),
+
+        "EMA 50":
+            round(ema50, 2),
+
+        "EMA 200":
+            round(ema200, 2),
+
+        "RSI":
+            round(rsi, 1),
+
+        "MACD":
+            round(macd, 2),
+
+        "Signal":
+            round(signal, 2),
+
+        "Volume":
+            f"{vol_multiplier:.1f}x",
+
+        "VCP":
+            "✅" if vcp else "❌",
+
+        "Stop
