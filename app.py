@@ -1,109 +1,83 @@
 import streamlit as st
 import yfinance as yf
-import pandas_ta as ta
 import pandas as pd
 import requests
 import io
-from datetime import datetime
 
-# Page Configuration
 st.set_page_config(page_title="Stock Screener Pro", layout="wide")
+st.title("📈 Swing Trading Filter (No-Error Version)")
 
-st.title("📈 Time-Machine Screener Pro")
-st.markdown("Ye filter NSE Cash stocks ko scan karta hai.")
+# Indicators Logic (Pure Pandas)
+def calculate_indicators(df, ema_len, rsi_len):
+    # EMA
+    df[f'EMA_{ema_len}'] = df['Close'].ewm(span=ema_len, adjust=False).mean()
+    
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len).mean()
+    rs = gain / loss
+    df[f'RSI_{rsi_len}'] = 100 - (100 / (1 + rs))
+    
+    # MACD (12, 26, 9)
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # ATR & Volume SMA
+    high_low = df['High'] - df['Low']
+    high_cp = abs(df['High'] - df['Close'].shift())
+    low_cp = abs(df['Low'] - df['Close'].shift())
+    df['ATR'] = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1).rolling(14).mean()
+    df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
+    return df
 
-# Sidebar - Inputs
-st.sidebar.header("Filter Settings")
-ema_len = st.sidebar.number_input("EMA Length", value=50)
-rsi_len = st.sidebar.number_input("RSI Length", value=14)
-rsi_thresh = st.sidebar.number_input("RSI Threshold (>)", value=60)
-vol_mult = st.sidebar.number_input("Volume Multiplier (x)", value=1.5)
-target_date = st.sidebar.text_input("Target Date (YYYY-MM-DD)", help="Khali chhodne par aaj ka data lega")
-
-# Function to get NSE stocks
-@st.cache_data # Isse baar-baar download nahi hoga
+@st.cache_data
 def get_all_nse_stocks():
     try:
         url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         df = pd.read_csv(io.StringIO(r.text))
-        df_eq = df[df['SERIES'] == 'EQ']
-        return [str(s).strip() + ".NS" for s in df_eq['SYMBOL'].tolist()]
-    except:
-        return []
+        return [str(s).strip() + ".NS" for s in df[df['SERIES'] == 'EQ']['SYMBOL'].tolist()]
+    except: return []
+
+# Sidebar
+ema_len = st.sidebar.number_input("EMA Length", value=50)
+rsi_thresh = st.sidebar.number_input("RSI Above", value=60)
+vol_mult = st.sidebar.number_input("Vol Multiplier", value=1.5)
 
 if st.sidebar.button("Run Scanner"):
     tickers = get_all_nse_stocks()
+    st.info(f"Scanning {len(tickers)} stocks...")
+    results = []
     
-    if not tickers:
-        st.error("NSE stocks fetch nahi ho paye. Check Internet.")
-    else:
-        st.info(f"Total {len(tickers)} stocks scan ho rahe hain... Kripya wait karein.")
-        
-        selected_stocks = []
-        progress_text = st.empty()
-        bar = st.progress(0)
-        
-        # Performance ke liye hum ise chunks me scan kar sakte hain
-        # Yahan main aapke original logic ko apply kar raha hu
-        for i, ticker in enumerate(tickers):
-            # Progress bar update
-            if i % 20 == 0:
-                bar.progress((i + 1) / len(tickers))
-                progress_text.text(f"Scanning: {ticker} ({i}/{len(tickers)})")
-
-            try:
-                df = yf.download(ticker, period="1y", progress=False)
-                if target_date:
-                    df = df.loc[:target_date]
-                
-                if df.empty or len(df) < max(ema_len, rsi_len) + 20:
-                    continue
-
-                # Indicators
-                df.ta.ema(length=ema_len, append=True)
-                df.ta.rsi(length=rsi_len, append=True)
-                df.ta.macd(append=True)
-                df.ta.atr(length=14, append=True)
-                df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
-
-                latest = df.iloc[-1]
-                close = float(latest['Close'])
-                ema_v = float(latest[f'EMA_{ema_len}'])
-                rsi_v = float(latest[f'RSI_{rsi_len}'])
-                macd_v = float(latest['MACD_12_26_9'])
-                macd_s = float(latest['MACDs_12_26_9'])
-                vol_c = float(latest['Volume'])
-                vol_a = float(latest['Vol_SMA_20'])
-
-                # Screening Logic
-                if (close > ema_v and rsi_v > rsi_thresh and 
-                    macd_v > macd_s and macd_v > 0 and 
-                    vol_c > (vol_a * vol_mult)):
-                    
-                    atr_v = float(latest['ATRr_14'])
-                    risk = 1.5 * atr_v
-                    
-                    selected_stocks.append({
-                        "Symbol": ticker.replace(".NS", ""),
-                        "Price": round(close, 2),
-                        "RSI": round(rsi_v, 1),
-                        "Vol_Spike": f"{round(vol_c/vol_a, 1)}x",
-                        "SL": round(close - risk, 2),
-                        "Target": round(close + (2 * risk), 2)
-                    })
-            except:
-                continue
-
-        # Results Display
-        if selected_stocks:
-            st.success(f"Dhunliya! {len(selected_stocks)} stocks mile.")
-            res_df = pd.DataFrame(selected_stocks)
-            st.table(res_df)
+    progress_bar = st.progress(0)
+    for i, ticker in enumerate(tickers[:150]): # Starting with 150 for speed
+        progress_bar.progress((i + 1) / 150)
+        try:
+            df = yf.download(ticker, period="1y", progress=False)
+            if len(df) < 50: continue
             
-            # Watchlist Download
-            tv_list = ",".join(["NSE:" + s['Symbol'] for s in selected_stocks])
-            st.download_button("Download TradingView Watchlist", tv_list, file_name="watchlist.txt")
-        else:
-            st.warning("Koi stock match nahi hua.")
+            df = calculate_indicators(df, ema_len, 14)
+            latest = df.iloc[-1]
+            
+            if (latest['Close'] > latest[f'EMA_{ema_len}'] and 
+                latest['RSI_14'] > rsi_thresh and 
+                latest['MACD'] > latest['Signal'] and latest['MACD'] > 0 and
+                latest['Volume'] > (latest['Vol_SMA_20'] * vol_mult)):
+                
+                risk = 1.5 * latest['ATR']
+                results.append({
+                    "Symbol": ticker.replace(".NS",""),
+                    "Price": round(float(latest['Close']), 2),
+                    "RSI": round(float(latest['RSI_14']), 1),
+                    "SL": round(float(latest['Close'] - risk), 2),
+                    "Target": round(float(latest['Close'] + (2*risk)), 2)
+                })
+        except: continue
+
+    if results:
+        st.success(f"Found {len(results)} stocks!")
+        st.table(pd.DataFrame(results))
+    else: st.warning("No stocks found.")
